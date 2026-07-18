@@ -167,6 +167,28 @@ def render(data):
     sep_y = leg_y + CELL + 14
     parts.append(f'<line x1="0" y1="{sep_y}" x2="{canvas_w}" y2="{sep_y}" stroke="{FRAME}" stroke-opacity="0.25"/>')
 
+    # continuous scanning sheen across the grid -- starts once the cell reveal
+    # finishes, then loops forever so the graph still feels "alive" after load
+    reveal_end = (n_cols - 1) * COL_T + 6 * ROW_T + CELL_DUR + 0.3
+    sweep_w = 90
+    parts.append(
+        '<defs><linearGradient id="sweep" x1="0" y1="0" x2="1" y2="0">'
+        '<stop offset="0" stop-color="#39d353" stop-opacity="0"/>'
+        '<stop offset="0.5" stop-color="#69f0a0" stop-opacity="0.28"/>'
+        '<stop offset="1" stop-color="#39d353" stop-opacity="0"/>'
+        '</linearGradient></defs>'
+    )
+    parts.append(
+        f'<clipPath id="gridclip"><rect x="{grid_left}" y="{grid_top}" width="{art_w}" height="{art_h}"/></clipPath>'
+    )
+    parts.append(
+        f'<g clip-path="url(#gridclip)">'
+        f'<rect x="{grid_left - sweep_w}" y="{grid_top}" width="{sweep_w}" height="{art_h}" fill="url(#sweep)">'
+        f'<animate attributeName="x" from="{grid_left - sweep_w}" to="{grid_left + art_w}" '
+        f'begin="{reveal_end:.2f}s" dur="3.2s" repeatCount="indefinite"/>'
+        f'</rect></g>'
+    )
+
     cs = data["current_streak"]["length"]
     ls = data["longest_streak"]["length"]
     total = data["total_contributions"]
