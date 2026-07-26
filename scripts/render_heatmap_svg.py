@@ -2,14 +2,21 @@
 """
 Render data/contributions.json (produced by fetch_contributions.py) as a proper
 GitHub-style contribution heatmap SVG: a grid of rounded, colored BOXES in the
-classic 53-week x 7-day calendar, revealed once with a diagonal line-after-line
-slide-down (CSS keyframes, plays on load then freezes -- no looping "glow"), a
-Less->More legend, and a real stats footer.
+classic 53-week x 7-day calendar.
+
+Reveal animation: a little jet flies left -> right underneath the grid. Every
+time it passes beneath a column that has a real contribution, it fires a
+tracer shot up at each active cell in that column; on impact there's a small
+explosion burst and the cell "appears" in its real color right as the flash
+fades. Empty (no-contribution) tiles are just always-visible background --
+they're never targeted. After the plane's one pass, a soft green sheen keeps
+sweeping the grid forever so it still feels alive.
 
 Run by .github/workflows/update-profile-art.yml after fetch_contributions.py.
 """
 import datetime
 import json
+import math
 import os
 
 HERE = os.path.dirname(__file__)
@@ -26,6 +33,7 @@ PAD = 22
 LEFT_LABEL_W = 30
 TOP_LABEL_H = 20
 TITLEBAR_H = 30
+PLANE_LANE = 34  # extra vertical space below the grid for the plane to fly through
 
 BG = "#0a0e14"
 BG2 = "#0d1420"
@@ -36,10 +44,11 @@ ACCENT = "#22d3ee"
 GREEN = "#39d353"
 GOLD = "#f2cc60"
 
-# reveal timing (one-shot)
-COL_T = 0.018   # per-column delay contribution (left -> right sweep)
-ROW_T = 0.045   # per-row delay contribution (top -> bottom cascade)
-CELL_DUR = 0.42
+# plane-bomb reveal timing (one-shot, plays once on load then freezes)
+FLIGHT = 7.0        # seconds for the plane to cross the whole grid
+TRAVEL = 0.16       # seconds for a tracer shot to travel from plane to cell
+EXPLODE = 0.4       # seconds for the impact flash / cell reveal
+ROW_STAGGER = 0.12  # extra delay between shots fired at the same column
 
 
 def level_for(count):
@@ -99,20 +108,13 @@ def render(data):
 
     canvas_w = PAD + LEFT_LABEL_W + art_w + PAD
     stats_h = 88
-    canvas_h = TITLEBAR_H + TOP_LABEL_H + art_h + stats_h + PAD
-
-    css = f"""
-@keyframes cell {{
-  0%   {{ opacity: 0; transform: translateY(-6px); }}
-  100% {{ opacity: 1; transform: translateY(0); }}
-}}
-.c {{ opacity: 0; animation: cell {CELL_DUR:.2f}s cubic-bezier(.2,.8,.2,1) both; }}
-""".strip()
+    grid_top = TITLEBAR_H + TOP_LABEL_H
+    grid_left = PAD + LEFT_LABEL_W
+    canvas_h = grid_top + art_h + PLANE_LANE + stats_h + PAD
 
     parts = [
         f'<svg xmlns="http://www.w3.org/2000/svg" width="{canvas_w}" height="{canvas_h}" '
         f'viewBox="0 0 {canvas_w} {canvas_h}" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace">',
-        f'<style>{css}</style>',
         '<defs>'
         f'<linearGradient id="hbg" x1="0" y1="0" x2="0" y2="1">'
         f'<stop offset="0" stop-color="{BG2}"/><stop offset="1" stop-color="{BG}"/></linearGradient>'
@@ -127,9 +129,6 @@ def render(data):
     parts.append(f'<text x="{canvas_w/2}" y="{TITLEBAR_H/2 + 4}" fill="{MUTED}" font-size="12" '
                  f'text-anchor="middle">avi@github: ~/contributions --graph</text>')
 
-    grid_top = TITLEBAR_H + TOP_LABEL_H
-    grid_left = PAD + LEFT_LABEL_W
-
     for ci, label in month_labels:
         x = grid_left + ci * STEP
         parts.append(f'<text x="{x}" y="{TITLEBAR_H + 14}" fill="{MUTED}" font-size="10">{label}</text>')
@@ -138,7 +137,35 @@ def render(data):
         y = grid_top + wi * STEP + CELL * 0.78
         parts.append(f'<text x="{PAD}" y="{y:.1f}" fill="{MUTED}" font-size="9">{wname}</text>')
 
-    # the boxes -- each a rounded rect, diagonal slide-down reveal (once, freeze)
+    # ---- work out plane-flight timing and per-cell impact times ----
+    plane_y = grid_top + art_h + PLANE_LANE / 2
+    plane_x_start = grid_left - 26
+    plane_x_end = grid_left + art_w + 26
+
+    def frame_for_x(x):
+        return (x - plane_x_start) / (plane_x_end - plane_x_start) * FLIGHT
+
+    active_by_col = {}
+    for ci, column in enumerate(grid):
+        for ri, cell in enumerate(column):
+            if cell is None:
+                continue
+            _, count, lvl = cell
+            if lvl >= 1:
+                active_by_col.setdefault(ci, []).append((ri, lvl))
+
+    impact = {}  # (ci,ri) -> impact time in seconds
+    for ci, rows in active_by_col.items():
+        col_center_x = grid_left + ci * STEP + CELL / 2
+        base_t = frame_for_x(col_center_x)
+        rows.sort()
+        for k, (ri, lvl) in enumerate(rows):
+            impact[(ci, ri)] = base_t + k * ROW_STAGGER
+
+    last_impact = max(impact.values()) if impact else 0.0
+    reveal_end = last_impact + EXPLODE + 0.5
+
+    # ---- base cells: always-visible background tiles ----
     for ci, column in enumerate(grid):
         gx = grid_left + ci * STEP
         for ri, cell in enumerate(column):
@@ -146,16 +173,80 @@ def render(data):
                 continue
             date_s, count, lvl = cell
             gy = grid_top + ri * STEP
-            delay = ci * COL_T + ri * ROW_T
             plural = "s" if count != 1 else ""
+            base_color = PALETTE[0] if lvl >= 1 else PALETTE[lvl]
             parts.append(
-                f'<rect class="c" x="{gx}" y="{gy}" width="{CELL}" height="{CELL}" rx="2.5" '
-                f'fill="{PALETTE[lvl]}" style="animation-delay:{delay:.3f}s">'
+                f'<rect x="{gx}" y="{gy}" width="{CELL}" height="{CELL}" rx="2.5" fill="{base_color}">'
                 f'<title>{date_s}: {count} contribution{plural}</title></rect>'
             )
 
-    # legend: Less [][][][][] More (bottom-right of the grid)
-    leg_y = grid_top + art_h + 6
+    # ---- reveal overlay + impact bursts + tracer shots for active cells ----
+    for (ci, ri), t in impact.items():
+        column = grid[ci]
+        _, count, lvl = column[ri]
+        gx = grid_left + ci * STEP
+        gy = grid_top + ri * STEP
+        cx, cy = gx + CELL / 2, gy + CELL / 2
+
+        # cell reveal: fades from base color to its real level color at impact
+        parts.append(
+            f'<rect x="{gx}" y="{gy}" width="{CELL}" height="{CELL}" rx="2.5" fill="{PALETTE[lvl]}" opacity="0">'
+            f'<animate attributeName="opacity" from="0" to="1" begin="{t:.3f}s" dur="{EXPLODE:.2f}s" fill="freeze"/>'
+            f'</rect>'
+        )
+
+        # impact burst: flash core + radiating spikes, timed to the same moment
+        parts.append(
+            f'<circle cx="{cx:.1f}" cy="{cy:.1f}" r="1" fill="#fff0c8">'
+            f'<animate attributeName="r" from="1" to="9" begin="{t:.3f}s" dur="{EXPLODE:.2f}s" fill="freeze"/>'
+            f'<animate attributeName="opacity" from="1" to="0" begin="{t:.3f}s" dur="{EXPLODE:.2f}s" fill="freeze"/>'
+            f'</circle>'
+        )
+        for si in range(6):
+            ang = si * (2 * math.pi / 6)
+            x2 = cx + math.cos(ang) * 10
+            y2 = cy + math.sin(ang) * 10
+            parts.append(
+                f'<line x1="{cx:.1f}" y1="{cy:.1f}" x2="{x2:.1f}" y2="{y2:.1f}" '
+                f'stroke="#ffb066" stroke-width="1.4" opacity="0">'
+                f'<animate attributeName="opacity" values="0;1;0" begin="{t:.3f}s" dur="{EXPLODE:.2f}s" fill="freeze"/>'
+                f'</line>'
+            )
+
+        # tracer shot: travels from the plane up to this cell just before impact
+        shot_begin = max(0.0, t - TRAVEL)
+        parts.append(
+            f'<circle r="1.6" fill="#fff2c8" opacity="0">'
+            f'<animate attributeName="opacity" values="0;1;1;0" keyTimes="0;0.05;0.85;1" '
+            f'begin="{shot_begin:.3f}s" dur="{TRAVEL:.2f}s" fill="freeze"/>'
+            f'<animate attributeName="cx" from="{cx:.1f}" to="{cx:.1f}" '
+            f'begin="{shot_begin:.3f}s" dur="{TRAVEL:.2f}s" fill="freeze"/>'
+            f'<animate attributeName="cy" from="{plane_y:.1f}" to="{cy:.1f}" '
+            f'begin="{shot_begin:.3f}s" dur="{TRAVEL:.2f}s" fill="freeze" '
+            f'calcMode="spline" keySplines="0.3 0 0.7 1"/>'
+            f'</circle>'
+        )
+
+    # ---- the plane itself: simple jet shape, flies once left -> right ----
+    parts.append(f'<g transform="translate({plane_x_start},{plane_y})">')
+    parts.append(
+        f'<animateTransform attributeName="transform" type="translate" additive="sum" '
+        f'from="0 0" to="{plane_x_end - plane_x_start:.1f} 0" begin="0.05s" dur="{FLIGHT:.2f}s" fill="freeze"/>'
+    )
+    parts.append(
+        '<polygon points="-2,0 -10,9 -4,2" fill="#78828c"/>'
+        '<polygon points="-2,0 -10,-9 -4,-2" fill="#78828c"/>'
+        '<polygon points="-9,0 -15,-6 -11,0" fill="#78828c"/>'
+        '<ellipse cx="0" cy="0" rx="10" ry="3.5" fill="#d2d7de"/>'
+        '<polygon points="8,-2 14,0 8,2" fill="#f0f4f8"/>'
+        '<ellipse cx="2" cy="0" rx="4" ry="1.8" fill="#4682d2"/>'
+        '<polygon points="-10,-1.4 -16,0 -10,1.4" fill="#ffb066"/>'
+    )
+    parts.append('</g>')
+
+    # legend + stats footer
+    art_bottom = grid_top + art_h + PLANE_LANE
+    leg_y = art_bottom + 6
     leg_x = canvas_w - PAD - (len(PALETTE) * (CELL - 1) + 70)
     parts.append(f'<text x="{leg_x}" y="{leg_y + CELL*0.8:.1f}" fill="{MUTED}" font-size="10" text-anchor="end">Less</text>')
     lx = leg_x + 8
@@ -167,9 +258,9 @@ def render(data):
     sep_y = leg_y + CELL + 14
     parts.append(f'<line x1="0" y1="{sep_y}" x2="{canvas_w}" y2="{sep_y}" stroke="{FRAME}" stroke-opacity="0.25"/>')
 
-    # continuous scanning sheen across the grid -- starts once the cell reveal
-    # finishes, then loops forever so the graph still feels "alive" after load
-    reveal_end = (n_cols - 1) * COL_T + 6 * ROW_T + CELL_DUR + 0.3
+    # continuous scanning sheen across the grid -- starts once the plane's pass
+    # (and every impact) has finished, then loops forever so the graph still
+    # feels "alive" long after the one-shot reveal is done
     sweep_w = 90
     parts.append(
         '<defs><linearGradient id="sweep" x1="0" y1="0" x2="1" y2="0">'
@@ -196,7 +287,6 @@ def render(data):
     rng = data["range"]
 
     ly = sep_y + 24
-    # left column: big highlighted numbers; right column: context in muted
     parts.append(f'<text x="{PAD}" y="{ly}" font-size="13" fill="{GREEN}">'
                  f'<tspan font-weight="700">{total:,}</tspan>'
                  f'<tspan fill="{MUTED}"> contributions in the last year</tspan></text>')
