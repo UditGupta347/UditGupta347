@@ -45,9 +45,8 @@
 
 ## 📊 GitHub Stats
 
-<img src="https://github-readme-stats.vercel.app/api?username=UditGupta347&show_icons=true&theme=dark&hide_border=true&count_private=true" height="165" alt="Udit's GitHub stats" />
-<img src="https://github-readme-stats.vercel.app/api/top-langs/?username=UditGupta347&layout=compact&theme=dark&hide_border=true" height="165" alt="Most used languages" />
-
+<img src="./stats-card.svg" height="165" alt="Udit's GitHub stats" />
+<img src="./langs-card.svg" height="165" alt="Most used languages" />
 <br><br>
 
 ## 💬 Random Dev Quote
